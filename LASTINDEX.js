@@ -4,12 +4,12 @@ const XLSX = require('xlsx');
 
 // ================== CẤU HÌNH ==================
 const VIDEO_URL = "https://www.facebook.com/jayed973/videos/893195033386431";
-const USER_DATA_DIR = "D:/temp/v2/modules"; // Profile đã login Facebook
+const USER_DATA_DIR = "D:/temp/v2/modules"; // Profile đã login
 
 let commentsData = [];
-let processedKeys = new Set(); // Tránh lặp do script gọi nhiều lần: key = uid + commentText
+let processedComments = new Set(); // Để tránh lặp comment do script (dựa trên uid + text đầy đủ)
 
-// Lưu dữ liệu ra file
+// Lưu file khi dừng
 function saveData() {
     if (commentsData.length === 0) {
         console.log("\nChưa thu thập được comment nào.");
@@ -47,14 +47,14 @@ function saveData() {
 
 function printSummary() {
     console.log("\n" + "=".repeat(100));
-    console.log(`THU THẬP HOÀN TẤT: ${commentsData.length} COMMENT`);
-    console.log("Dữ liệu đã được lưu đầy đủ vào file CSV & Excel.");
+    console.log(`ĐÃ THU THẬP XONG: ${commentsData.length} COMMENT (không lặp do script)`);
+    console.log("Dữ liệu đầy đủ đã lưu vào file CSV & Excel.");
     console.log("=".repeat(100));
 }
 
 (async () => {
-    console.log("FB LIVESTREAM COMMENT COLLECTOR - REALTIME SIÊU CHÍNH XÁC (2025)");
-    console.log("Đang mở video và chờ comment tự nhảy lên...\n");
+    console.log("FB LIVESTREAM COMMENT COLLECTOR - REALTIME THUẦN TÚY (Sửa lỗi gộp text & lặp comment)");
+    console.log("Chỉ chờ comment tự nhảy lên → hiển thị và lưu ngay lập tức!\n");
 
     const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
         headless: false,
@@ -68,90 +68,77 @@ function printSummary() {
 
     const page = context.pages()[0] || await context.newPage();
     await page.goto(VIDEO_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForTimeout(15000); // Chờ livestream và comment load
+    await page.waitForTimeout(15000); // Chờ livestream/comment load ổn định
 
-    // Hàm xử lý comment mới (gọi từ browser)
-    await page.exposeFunction('collectNewComments', async () => {
+    // Hàm xử lý và in comment mới
+    await page.exposeFunction('processNewComments', async () => {
         try {
-            // Selector chính xác cho từng comment (livestream/reel/video)
-            const commentElements = await page.$$(`
+            const commentEls = await page.$$(`
                 div[role="article"][aria-label^="Comment"],
                 div[role="article"][aria-label^="Bình luận"],
                 div.x1n2onr6 div[role="article"],
                 div.x1yztbdb div[role="article"],
-                div[data-ad-comet-preview="message"],
-                div.xwib8y2.xpdmqnj.x1g0dm76.x1y1aw1k
+                div[data-ad-comet-preview="message"]
             `);
 
             let newCount = 0;
 
-            for (const el of commentElements) {
+            for (const el of commentEls) {
                 try {
-                    // ===== LẤY TÊN NGƯỜI DÙNG (Username) =====
+                    // Tên người dùng (tối ưu để lấy chính xác, không lẫn với comment)
                     let user = "Unknown";
-                    const nameSelector = 'a[role="link"] span.x193iq5w.xeuugli[dir="auto"], a[role="link"] strong span, span.x193iq5w.xeuugli[dir="auto"] > span';
-                    const nameEl = await el.$(nameSelector);
-                    if (nameEl) {
-                        user = (await nameEl.innerText()).trim();
-                    }
+                    const nameEl = await el.$('a[role="link"] strong > span, a[role="link"] span > strong, h3 > span, span[dir="auto"] > strong > span');
+                    if (nameEl) user = (await nameEl.innerText()).trim() || "Unknown";
 
-                    // ===== LẤY UID =====
+                    // UID
                     let uid = "Unknown";
-                    const profileLink = await el.$('a[role="link"][href*="facebook.com/"]:not([href*="comment_id"])');
-                    if (profileLink) {
-                        const href = await profileLink.getAttribute('href');
+                    const linkEl = await el.$('a[role="link"][href*="facebook.com/"]');
+                    if (linkEl) {
+                        const href = await linkEl.getAttribute('href');
                         const match = href.match(/\/(profile\.php\?id=|user\/|people\/[^\/]+\/)(\d+)/);
                         if (match) uid = match[2];
                     }
 
-                    // ===== LẤY NỘI DUNG COMMENT (chỉ text thật, không lẫn tên) =====
+                    // Nội dung comment (tối ưu selector để CHỈ lấy phần text comment, loại trừ tên user và các phần khác)
                     let commentText = "";
-                    // Ưu tiên div có style text-align: start (phổ biến nhất hiện nay)
-                    const mainTextEl = await el.$('div[dir="auto"][style*="text-align: start"] > div[dir="auto"]');
-                    if (mainTextEl) {
-                        commentText = (await mainTextEl.innerText()).trim();
-                    } else {
-                        // Fallback: các span/dir="auto" không chứa link hoặc strong
-                        const fallbackEls = await el.$$('span[dir="auto"]:not(:has(a)):not(:has(strong)), div[dir="auto"]:not(:has(a)):not(:has(strong))');
-                        for (const f of fallbackEls) {
-                            const txt = (await f.innerText()).trim();
-                            if (txt && txt.length > 0 && txt !== user) {
-                                commentText = txt;
-                                break;
-                            }
+                    const textEls = await el.$$('div[dir="auto"] > div:not(:has(a[role="link"])):not(:has(strong)):not(:has(span[aria-hidden])), span[dir="auto"]:not(:has(strong))');
+                    for (const t of textEls) {
+                        const txt = (await t.innerText()).trim();
+                        if (txt.length > 1 && txt !== user) { // Loại bỏ nếu trùng tên user
+                            commentText += txt + " ";
                         }
                     }
+                    commentText = commentText.trim();
 
-                    if (commentText.length < 1) continue;
+                    if (commentText.length < 2) continue;
 
-                    // Key chống lặp do script (không ảnh hưởng đến comment trùng thật từ user)
+                    // Key để tránh lặp do script (cho phép trùng nếu user thật sự comment lại)
                     const key = `${uid}-${commentText}`;
-                    if (processedKeys.has(key)) continue;
-                    processedKeys.add(key);
+                    if (processedComments.has(key)) continue;
+                    processedComments.add(key);
 
-                    // Lưu và in realtime
                     const timeStr = new Date().toTimeString().slice(0, 8);
                     const entry = { time: timeStr, user, uid, comment: commentText };
                     commentsData.push(entry);
 
+                    // IN RA NGAY LẬP TỨC - ĐẦY ĐỦ
                     console.log(`[${timeStr}] ${user.padEnd(28)} | UID: ${uid.padEnd(16)} | ${commentText}`);
+
                     newCount++;
 
-                } catch (innerErr) {
-                    // Bỏ qua lỗi từng comment
-                }
+                } catch (e) {}
             }
 
             if (newCount > 0) {
-                console.log(`→ Đã thu thập thêm ${newCount} comment mới | Tổng: ${commentsData.length}\n`);
+                console.log(`→ Phát hiện ${newCount} comment mới thật sự | Tổng: ${commentsData.length}\n`);
             }
 
         } catch (err) {
-            console.error("Lỗi trong collectNewComments:", err);
+            console.error("Lỗi xử lý comment:", err);
         }
     });
 
-    // MutationObserver + debounce nhẹ để bắt realtime mượt mà
+    // MutationObserver với debounce nhẹ (200ms) để tránh gọi quá nhiều lần khi DOM thay đổi nhanh
     await page.evaluate(() => {
         function debounce(func, delay) {
             let timer;
@@ -163,24 +150,24 @@ function printSummary() {
 
         const container = document.querySelector('div[role="feed"]') || document.body;
 
-        const debouncedCollect = debounce(() => {
+        const debouncedProcess = debounce(() => {
             // @ts-ignore
-            window.collectNewComments();
-        }, 250); // 250ms đủ để gom các comment nhảy cùng lúc
+            window.processNewComments();
+        }, 200);
 
-        const observer = new MutationObserver(debouncedCollect);
+        const observer = new MutationObserver(debouncedProcess);
         observer.observe(container, {
             childList: true,
             subtree: true
         });
 
-        console.log("ĐÃ KÍCH HOẠT THEO DÕI REALTIME!");
-        console.log("Mọi comment mới sẽ được hiển thị ngay lập tức, username và nội dung đã được tách riêng chính xác.\n");
+        console.log("ĐÃ KÍCH HOẠT THEO DÕI REALTIME VỚI CHỐNG LẶP!");
+        console.log("Comment mới sẽ hiển thị ngay, không gộp tên và không lặp vô lý...\n");
     });
 
     // Ctrl + C để dừng và lưu
     process.on('SIGINT', async () => {
-        console.log("\n\nĐang dừng thu thập và lưu dữ liệu...");
+        console.log("\n\nĐang dừng và lưu dữ liệu...");
         printSummary();
         saveData();
         console.log("\nHoàn tất! Đóng trình duyệt...");
