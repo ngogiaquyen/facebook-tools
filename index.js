@@ -15,32 +15,30 @@ const VIDEO_URL = "https://www.facebook.com/lynhousenew/videos/896882766244966";
 const USER_DATA_DIR = "E:\\TOOL\\FACEBOOK\\nodejs\\fb_profile_tool";
 const PORT = 3000;
 
-// Thư mục lưu trữ đầu ra
+// Thư mục output
 const OUTPUT_DIR = path.join(__dirname, 'output');
 if (!fs.existsSync(OUTPUT_DIR)) {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
     console.log(`Đã tạo thư mục output: ${OUTPUT_DIR}`);
 }
 
-// File lịch sử chung (trong thư mục output)
 const HISTORY_CSV = path.join(OUTPUT_DIR, 'fb_comments_history.csv');
 
 // ================== BIẾN TOÀN CỤC ==================
 let commentsData = []; // Session hiện tại
-const allTimeComments = new Set(); // Chống trùng toàn lịch sử
+const allTimeComments = new Set(); // Chống trùng lịch sử (dựa trên nội dung comment)
 const lastComments = new Map(); // Chống lặp realtime
-const trendMap = new Map();
+const exactCommentMap = new Map(); // comment giống y hệt => số lượt (cho Top Bình Chọn)
 
 // Load lịch sử cũ để chống trùng
 if (fs.existsSync(HISTORY_CSV)) {
     const content = fs.readFileSync(HISTORY_CSV, 'utf8');
-    const lines = content.split('\n').slice(1); // Bỏ header
+    const lines = content.split('\n').slice(1);
     lines.forEach(line => {
         if (line.trim()) {
-            // Lấy nội dung comment (cột cuối, có thể có dấu phẩy bên trong)
-            const parts = line.match(/(".*?")(?:,(?!"))?$/);
-            if (parts && parts[1]) {
-                const comment = parts[1].slice(1, -1).replace(/""/g, '"');
+            const match = line.match(/"([^"]*)"(?:,$|$)/);
+            if (match && match[1]) {
+                const comment = match[1].replace(/""/g, '"');
                 allTimeComments.add(comment);
             }
         }
@@ -61,40 +59,29 @@ if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir, { recursive: true });
 
 server.listen(PORT, () => {
     console.log(`\n🌐 Dashboard realtime: http://localhost:${PORT}`);
-    console.log(`📁 Tất cả file lưu vào: ${OUTPUT_DIR}\n`);
+    console.log(`📁 Dữ liệu lưu tại: ${OUTPUT_DIR}\n`);
 });
 
-// ================== HÀM XỬ LÝ TRENDS ==================
-function normalizePhrase(text) {
-    return text
-        .toLowerCase()
-        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
+// ================== TOP BÌNH CHỌN: ĐẾM COMMENT GIỐNG Y HỆT NHAU ==================
+function updateVoteRanking(commentText) {
+    const trimmed = commentText.trim();
+    if (trimmed.length === 0) return;
 
-function updateTrends(commentText) {
-    const normalized = normalizePhrase(commentText);
-    const words = normalized.split(' ');
-    const phrases = [];
-    for (let len = 2; len <= 4; len++) {
-        for (let i = 0; i <= words.length - len; i++) {
-            const phrase = words.slice(i, i + len).join(' ');
-            if (phrase.length >= 4) phrases.push(phrase);
-        }
-    }
-    phrases.forEach(phrase => {
-        trendMap.set(phrase, (trendMap.get(phrase) || 0) + 1);
-    });
+    const count = (exactCommentMap.get(trimmed) || 0) + 1;
+    exactCommentMap.set(trimmed, count);
 
-    const sorted = Array.from(trendMap.entries())
+    // Top 15 comment giống nhau nhiều nhất
+    const sorted = Array.from(exactCommentMap.entries())
         .sort((a, b) => b[1] - a[1])
-        .slice(0, 20);
+        .slice(0, 15);
 
-    io.emit('updateTrends', sorted.map(([phrase, count]) => ({ phrase, count })));
+    io.emit('updateTrends', sorted.map(([comment, count]) => ({
+        phrase: comment,
+        count
+    })));
 }
 
-// ================== LƯU DỮ LIỆU VÀO THƯ MỤC OUTPUT ==================
+// ================== LƯU DỮ LIỆU ==================
 function appendToHistory() {
     let csvLines = [];
     const isNewFile = !fs.existsSync(HISTORY_CSV);
@@ -125,7 +112,7 @@ function saveSnapshot() {
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 15);
 
-    // Snapshot Excel session
+    // Snapshot Excel
     const xlsxFile = path.join(OUTPUT_DIR, `fb_comments_snapshot_${timestamp}.xlsx`);
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.aoa_to_sheet([
@@ -136,32 +123,32 @@ function saveSnapshot() {
     XLSX.writeFile(wb, xlsxFile);
     console.log(`Đã lưu snapshot Excel:\n   → ${xlsxFile}`);
 
-    // Trends
-    const trendsFile = path.join(OUTPUT_DIR, `fb_trends_${timestamp}.csv`);
-    const sortedTrends = Array.from(trendMap.entries())
+    // Top bình chọn (comment giống nhau)
+    const trendsFile = path.join(OUTPUT_DIR, `fb_top_binh_chon_${timestamp}.csv`);
+    const sorted = Array.from(exactCommentMap.entries())
         .sort((a, b) => b[1] - a[1])
-        .map(([phrase, count], i) => [i + 1, phrase, count]);
+        .map(([comment, count], i) => [i + 1, comment, count]);
 
-    if (sortedTrends.length > 0) {
-        const trendsCsv = [["Xếp hạng", "Cụm từ hot", "Số lần xuất hiện"], ...sortedTrends]
+    if (sorted.length > 0) {
+        const csv = [["Xếp hạng", "Nội dung comment", "Số lượt bình chọn"], ...sorted]
             .map(row => row.join(",")).join("\n");
-        fs.writeFileSync(trendsFile, '\uFEFF' + trendsCsv, 'utf8');
-        console.log(`Đã lưu trends:\n   → ${trendsFile}`);
+        fs.writeFileSync(trendsFile, '\uFEFF' + csv, 'utf8');
+        console.log(`Đã lưu Top Bình Chọn:\n   → ${trendsFile}`);
     }
 }
 
 function printSummary() {
     console.log("\n" + "=".repeat(100));
-    console.log(`SESSION HOÀN TẤT: ${commentsData.length} comment (mới: ${commentsData.filter(c => !allTimeComments.has(c.comment)).length})`);
+    console.log(`SESSION: ${commentsData.length} comment mới`);
     console.log(`TỔNG LỊCH SỬ: ${allTimeComments.size} comment duy nhất`);
-    console.log(`Trends hiện tại: ${trendMap.size} cụm từ hot`);
-    console.log(`Tất cả file đã lưu trong thư mục: ${OUTPUT_DIR}`);
+    console.log(`TOP BÌNH CHỌN: ${exactCommentMap.size} mẫu comment khác nhau`);
+    console.log(`Tất cả file đã lưu trong: ${OUTPUT_DIR}`);
     console.log("=".repeat(100));
 }
 
 // ================== PLAYWRIGHT SCRAPER ==================
 (async () => {
-    console.log("🚀 FB LIVE COMMENT TRACKER PRO - OUTPUT FOLDER + FIX FOLLOW (2025)");
+    console.log("🏆 FB CUỘC THI BÌNH CHỌN - TOP COMMENT GIỐNG NHAU REALTIME (2025)");
 
     const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
         headless: false,
@@ -202,8 +189,6 @@ function printSummary() {
                 }
 
                 let commentText = "";
-
-                // Fix lỗi "Follow": ưu tiên lấy đúng nội dung comment thật
                 const realTextEl = await el.$('div[dir="auto"][style*="text-align: start"] > div[dir="auto"]');
                 if (realTextEl) {
                     commentText = (await realTextEl.innerText()).trim();
@@ -234,7 +219,9 @@ function printSummary() {
 
                 console.log(`[${timeStr}] ${user.padEnd(28)} | ${commentText}`);
                 io.emit('newComment', { time: timeStr, user, comment: commentText });
-                updateTrends(commentText);
+
+                // Cập nhật Top Bình Chọn: đếm comment giống y hệt
+                updateVoteRanking(commentText);
             }
         } catch (err) {
             // Silent
@@ -248,7 +235,7 @@ function printSummary() {
     });
 
     process.on('SIGINT', async () => {
-        console.log("\n\nĐang lưu dữ liệu vào thư mục output và dừng chương trình...");
+        console.log("\n\nĐang lưu dữ liệu và dừng chương trình...");
         appendToHistory();
         saveSnapshot();
         printSummary();
