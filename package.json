@@ -1,0 +1,23 @@
+{
+  "name": "fb-live-comment-crawler",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cli-table3": "^0.6.5",
+    "colors": "^1.4.0",
+    "csv-writer": "^1.6.0",
+    "exceljs": "^4.4.0",
+    "moment": "^2.30.1",
+    "pandas-js": "^0.2.4",
+    "puppeteer": "^24.34.0",
+    "readline-sync": "^1.4.10"
+  }
+}
