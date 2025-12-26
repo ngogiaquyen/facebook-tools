@@ -1,40 +1,32 @@
-const { chromium } = require('playwright');
-const fs = require('fs');
-const XLSX = require('xlsx');
+import { chromium } from 'playwright';
+import fs from 'fs';
+import XLSX from 'xlsx';
 
 // ================== CẤU HÌNH ==================
-const VIDEO_URL = "https://www.facebook.com/jayed973/videos/893195033386431";
-const USER_DATA_DIR = "D:/temp/v2/modules"; // Profile đã login Facebook
+const VIDEO_URL = "https://www.facebook.com/lynhousenew/videos/896882766244966";
+const USER_DATA_DIR = "E:\\TOOL\\FACEBOOK\\nodejs\\fb_profile_tool";
 
+// ================== BIẾN TOÀN CỤC ==================
 let commentsData = [];
-let processedKeys = new Set(); // Tránh lặp do script gọi nhiều lần: key = uid + commentText
+const lastComments = new Map(); // Chống lặp
 
-// Lưu dữ liệu ra file
 function saveData() {
     if (commentsData.length === 0) {
         console.log("\nChưa thu thập được comment nào.");
         return;
     }
-
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 15);
     const csvFile = `fb_comments_${timestamp}.csv`;
     const xlsxFile = `fb_comments_${timestamp}.xlsx`;
 
-    // CSV
     const csvContent = [
         ["Thời gian", "Tên người dùng", "UID", "Nội dung comment"],
-        ...commentsData.map(c => [
-            c.time,
-            c.user,
-            c.uid,
-            `"${c.comment.replace(/"/g, '""')}"`
-        ])
+        ...commentsData.map(c => [c.time, c.user, c.uid, `"${c.comment.replace(/"/g, '""')}"`])
     ].map(row => row.join(",")).join("\n");
 
     fs.writeFileSync(csvFile, '\uFEFF' + csvContent, 'utf8');
     console.log(`\nĐã lưu CSV: ${csvFile}`);
 
-    // Excel
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.aoa_to_sheet([
         ["Thời gian", "Tên người dùng", "UID", "Nội dung comment"],
@@ -54,26 +46,20 @@ function printSummary() {
 
 (async () => {
     console.log("FB LIVESTREAM COMMENT COLLECTOR - REALTIME SIÊU CHÍNH XÁC (2025)");
-    console.log("Đang mở video và chờ comment tự nhảy lên...\n");
+    console.log("Đang mở video... Mọi comment mới sẽ NHẢY TỪNG CÁI MỘT ngay lập tức!\n");
 
     const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
         headless: false,
         viewport: { width: 1366, height: 768 },
-        args: [
-            "--start-maximized",
-            "--disable-blink-features=AutomationControlled",
-            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ]
+        args: ["--start-maximized", "--disable-blink-features=AutomationControlled"]
     });
 
     const page = context.pages()[0] || await context.newPage();
     await page.goto(VIDEO_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await page.waitForTimeout(15000); // Chờ livestream và comment load
+    await page.waitForTimeout(8000);
 
-    // Hàm xử lý comment mới (gọi từ browser)
     await page.exposeFunction('collectNewComments', async () => {
         try {
-            // Selector chính xác cho từng comment (livestream/reel/video)
             const commentElements = await page.$$(`
                 div[role="article"][aria-label^="Comment"],
                 div[role="article"][aria-label^="Bình luận"],
@@ -83,104 +69,74 @@ function printSummary() {
                 div.xwib8y2.xpdmqnj.x1g0dm76.x1y1aw1k
             `);
 
-            let newCount = 0;
-
             for (const el of commentElements) {
-                try {
-                    // ===== LẤY TÊN NGƯỜI DÙNG (Username) =====
-                    let user = "Unknown";
-                    const nameSelector = 'a[role="link"] span.x193iq5w.xeuugli[dir="auto"], a[role="link"] strong span, span.x193iq5w.xeuugli[dir="auto"] > span';
-                    const nameEl = await el.$(nameSelector);
-                    if (nameEl) {
-                        user = (await nameEl.innerText()).trim();
-                    }
+                const alreadyProcessed = await el.evaluate(node => node.dataset.processed === 'true');
+                if (alreadyProcessed) continue;
+                await el.evaluate(node => node.dataset.processed = 'true');
 
-                    // ===== LẤY UID =====
-                    let uid = "Unknown";
-                    const profileLink = await el.$('a[role="link"][href*="facebook.com/"]:not([href*="comment_id"])');
-                    if (profileLink) {
-                        const href = await profileLink.getAttribute('href');
-                        const match = href.match(/\/(profile\.php\?id=|user\/|people\/[^\/]+\/)(\d+)/);
-                        if (match) uid = match[2];
-                    }
+                let user = "Unknown";
+                const nameEl = await el.$('a[role="link"] span.x193iq5w.xeuugli[dir="auto"], a[role="link"] strong span, span.x193iq5w.xeuugli[dir="auto"] > span');
+                if (nameEl) user = (await nameEl.innerText()).trim();
 
-                    // ===== LẤY NỘI DUNG COMMENT (chỉ text thật, không lẫn tên) =====
-                    let commentText = "";
-                    // Ưu tiên div có style text-align: start (phổ biến nhất hiện nay)
-                    const mainTextEl = await el.$('div[dir="auto"][style*="text-align: start"] > div[dir="auto"]');
-                    if (mainTextEl) {
-                        commentText = (await mainTextEl.innerText()).trim();
-                    } else {
-                        // Fallback: các span/dir="auto" không chứa link hoặc strong
-                        const fallbackEls = await el.$$('span[dir="auto"]:not(:has(a)):not(:has(strong)), div[dir="auto"]:not(:has(a)):not(:has(strong))');
-                        for (const f of fallbackEls) {
-                            const txt = (await f.innerText()).trim();
-                            if (txt && txt.length > 0 && txt !== user) {
-                                commentText = txt;
-                                break;
-                            }
+                let uid = "Unknown";
+                const profileLink = await el.$('a[role="link"][href*="facebook.com/"]:not([href*="comment_id"])');
+                if (profileLink) {
+                    const href = await profileLink.getAttribute('href');
+                    const match = href.match(/\/(profile\.php\?id=|user\/|people\/[^\/]+\/)(\d+)/);
+                    if (match) uid = match[2];
+                }
+
+                let commentText = "";
+                const mainTextEl = await el.$('div[dir="auto"][style*="text-align: start"] > div[dir="auto"]');
+                if (mainTextEl) {
+                    commentText = (await mainTextEl.innerText()).trim();
+                } else {
+                    const fallbackEls = await el.$$('span[dir="auto"]:not(:has(a)):not(:has(strong)), div[dir="auto"]:not(:has(a)):not(:has(strong))');
+                    for (const f of fallbackEls) {
+                        const txt = (await f.innerText()).trim();
+                        if (txt && txt.length > 0 && txt !== user) {
+                            commentText = txt;
+                            break;
                         }
                     }
-
-                    if (commentText.length < 1) continue;
-
-                    // Key chống lặp do script (không ảnh hưởng đến comment trùng thật từ user)
-                    const key = `${uid}-${commentText}`;
-                    if (processedKeys.has(key)) continue;
-                    processedKeys.add(key);
-
-                    // Lưu và in realtime
-                    const timeStr = new Date().toTimeString().slice(0, 8);
-                    const entry = { time: timeStr, user, uid, comment: commentText };
-                    commentsData.push(entry);
-
-                    console.log(`[${timeStr}] ${user.padEnd(28)} | UID: ${uid.padEnd(16)} | ${commentText}`);
-                    newCount++;
-
-                } catch (innerErr) {
-                    // Bỏ qua lỗi từng comment
                 }
-            }
 
-            if (newCount > 0) {
-                console.log(`→ Đã thu thập thêm ${newCount} comment mới | Tổng: ${commentsData.length}\n`);
-            }
+                if (commentText.length < 1) continue;
 
+                const now = Date.now();
+                const key = `${uid}_${commentText}`;
+                const last = lastComments.get(key);
+                if (last && (now - last.time) < 2500) continue;
+                lastComments.set(key, { time: now });
+
+                const timeStr = new Date().toTimeString().slice(0, 8);
+                const entry = { time: timeStr, user, uid, comment: commentText };
+                commentsData.push(entry);
+
+                // === ĐÂY LÀ ĐIỀU BẠN MUỐN: HIỆN NGAY LẬP TỨC, TỪNG CÁI MỘT ===
+                console.log(`[${timeStr}] ${user.padEnd(28)} | ${commentText}`);
+
+            }
         } catch (err) {
-            console.error("Lỗi trong collectNewComments:", err);
+            // Không in lỗi để màn hình sạch
         }
     });
 
-    // MutationObserver + debounce nhẹ để bắt realtime mượt mà
     await page.evaluate(() => {
-        function debounce(func, delay) {
-            let timer;
-            return () => {
-                clearTimeout(timer);
-                timer = setTimeout(func, delay);
-            };
-        }
-
-        const container = document.querySelector('div[role="feed"]') || document.body;
-
-        const debouncedCollect = debounce(() => {
-            // @ts-ignore
+        const observer = new MutationObserver(() => {
+            // Gọi ngay lập tức, không debounce nữa
             window.collectNewComments();
-        }, 250); // 250ms đủ để gom các comment nhảy cùng lúc
-
-        const observer = new MutationObserver(debouncedCollect);
-        observer.observe(container, {
-            childList: true,
-            subtree: true
         });
 
-        console.log("ĐÃ KÍCH HOẠT THEO DÕI REALTIME!");
-        console.log("Mọi comment mới sẽ được hiển thị ngay lập tức, username và nội dung đã được tách riêng chính xác.\n");
+        const container = document.querySelector('div[role="feed"]') || document.body;
+        observer.observe(container, { childList: true, subtree: true });
+
+        console.log("ĐÃ KÍCH HOẠT REALTIME 100%!");
+        console.log("Comment mới sẽ NHẢY TỪNG CÁI MỘT giống hệt Facebook!\n");
     });
 
-    // Ctrl + C để dừng và lưu
     process.on('SIGINT', async () => {
-        console.log("\n\nĐang dừng thu thập và lưu dữ liệu...");
+        console.log("\n\nĐang dừng và lưu dữ liệu...");
         printSummary();
         saveData();
         console.log("\nHoàn tất! Đóng trình duyệt...");
@@ -188,6 +144,5 @@ function printSummary() {
         process.exit(0);
     });
 
-    // Giữ script chạy mãi
     await new Promise(() => {});
 })();
